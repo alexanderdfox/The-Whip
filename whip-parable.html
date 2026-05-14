@@ -1,0 +1,823 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title></title>
+  <style>
+    * { margin: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+    canvas { display: block; width: 100%; height: 100%; }
+  </style>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.170.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.170.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <script type="module">
+    import * as THREE from "three";
+    import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+    import { Sky } from "three/addons/objects/Sky.js";
+
+    const canvas = document.createElement("canvas");
+    document.body.appendChild(canvas);
+
+    const CYCLE = 24;
+    let lastCrack = -999;
+    let prevPhase = "rest";
+
+    function cyclePhase(now) {
+      return (now % (CYCLE * 1000)) / (CYCLE * 1000);
+    }
+
+    function storyToWhipU(u) {
+      if (u < 0.12) return 0.02;
+      if (u > 0.74) return 0.98;
+      return (u - 0.12) / (0.74 - 0.12);
+    }
+
+    function herdScatterAmount(u) {
+      if (u < 0.18) return u / 0.18;
+      if (u < 0.5) return 1;
+      return Math.max(0, 1 - (u - 0.5) / 0.22);
+    }
+
+    function herdGatherAmount(u) {
+      if (u < 0.48) return 0;
+      return Math.min(1, (u - 0.48) / 0.32);
+    }
+
+    function whipState(u) {
+      if (u < 0.08) return { phase: "gather", p: u / 0.08 };
+      if (u < 0.22) return { phase: "throw", p: (u - 0.08) / 0.14 };
+      if (u < 0.38) return { phase: "uncoil", p: (u - 0.22) / 0.16 };
+      if (u < 0.48) return { phase: "crack", p: (u - 0.38) / 0.1 };
+      if (u < 0.62) return { phase: "fall", p: (u - 0.48) / 0.14 };
+      return { phase: "rest", p: (u - 0.62) / (1 - 0.62) };
+    }
+
+    function whipMotion(u) {
+      const st = whipState(u);
+      let arm = -0.85;
+      let reach = 0;
+      let coil = 1;
+      let tipBoost = 0;
+      let crackFlash = 0;
+      let droop = 0;
+
+      if (st.phase === "gather") {
+        arm = -1.1 + st.p * 0.25;
+        coil = 1;
+        reach = st.p * 0.05;
+      } else if (st.phase === "throw") {
+        arm = -0.85 + st.p * 1.55;
+        reach = 0.05 + st.p * 0.55;
+        coil = 1 - st.p * 0.85;
+      } else if (st.phase === "uncoil") {
+        arm = 0.7 + st.p * 0.35;
+        reach = 0.6 + st.p * 0.35;
+        coil = 0.15 * (1 - st.p);
+        tipBoost = st.p * st.p * 0.42;
+      } else if (st.phase === "crack") {
+        arm = 1.05;
+        reach = 0.95;
+        coil = 0;
+        tipBoost = 0.42 + st.p * 0.18;
+        crackFlash = Math.sin(st.p * Math.PI);
+      } else if (st.phase === "fall") {
+        arm = 1.05 - st.p * 0.9;
+        reach = 0.95 - st.p * 0.5;
+        tipBoost = 0.6 - st.p * 0.55;
+        droop = st.p;
+      } else {
+        arm = 0.15 + Math.sin(st.p * Math.PI * 2) * 0.05;
+        reach = 0.45 + Math.sin(st.p * Math.PI * 3) * 0.02;
+        tipBoost = 0.05;
+        droop = 1;
+      }
+
+      const twist = st.phase === "throw" || st.phase === "uncoil" || st.phase === "crack"
+        ? Math.sin(st.p * Math.PI) * 0.42
+        : st.phase === "gather"
+          ? st.p * 0.12
+          : st.phase === "fall"
+            ? (1 - st.p) * 0.22
+            : 0.05;
+
+      const armR = arm;
+      const armL = -0.35 - (arm - 0.2) * 0.92;
+
+      return { armR, armL, twist, reach, coil, tipBoost, crackFlash, droop };
+    }
+
+    function buildWhipPoints(
+      handWorld,
+      arm,
+      reach,
+      coil,
+      tipBoost,
+      droop,
+      timeMs,
+      arcSign
+    ) {
+      const yaw = arm + 0.12 * arcSign;
+      const dir = new THREE.Vector3(Math.cos(yaw), 0.06 * arcSign, Math.sin(yaw)).normalize();
+      const up = new THREE.Vector3(0, 1, 0);
+      const side = new THREE.Vector3().crossVectors(dir, up).normalize();
+      const len = 2.15 + reach * 6.0;
+      const segments = 36;
+      const pts = [];
+
+      for (let i = 0; i <= segments; i++) {
+        const k = i / segments;
+        const thick = Math.pow(1 - k, 1.55);
+        const wave =
+          Math.sin(k * Math.PI * (3 + coil * 4) + timeMs * 0.0005) * (0.1 * coil * (1 - k));
+        const surge = tipBoost * Math.pow(Math.max(0, k - 0.55) / 0.45, 2) * 1.32;
+        const along = len * k + surge;
+        const arcY =
+          arcSign *
+          (Math.sin(k * Math.PI) * 0.55 * (0.35 + coil * 0.65) +
+            surge * 0.22 +
+            tipBoost * Math.pow(k, 1.8) * 0.45);
+        const p = new THREE.Vector3()
+          .copy(handWorld)
+          .addScaledVector(dir, along)
+          .addScaledVector(side, wave)
+          .add(new THREE.Vector3(0, arcY - droop * k * k * 0.5 * (arcSign > 0 ? 1 : 0.35), 0));
+        pts.push({ p, thick });
+      }
+
+      return pts;
+    }
+
+    function proceduralNoiseCanvas(size, seed, tintR, tintG, tintB) {
+      const c = document.createElement("canvas");
+      c.width = c.height = size;
+      const g = c.getContext("2d");
+      const img = g.createImageData(size, size);
+      for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+          const i = (y * size + x) * 4;
+          const n =
+            Math.sin(x * 0.08 + seed) * Math.cos(y * 0.07 + seed * 2) * 0.5 +
+            Math.sin(x * 0.02 + y * 0.03) * 0.5;
+          const v = 128 + n * 70;
+          img.data[i] = v * tintR;
+          img.data[i + 1] = v * tintG;
+          img.data[i + 2] = v * tintB;
+          img.data[i + 3] = 255;
+        }
+      }
+      g.putImageData(img, 0, 0);
+      const tex = new THREE.CanvasTexture(c);
+      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      tex.repeat.set(28, 28);
+      tex.anisotropy = 8;
+      tex.colorSpace = THREE.SRGBColorSpace;
+      return tex;
+    }
+
+    function proceduralNormalCanvas(size) {
+      const c = document.createElement("canvas");
+      c.width = c.height = size;
+      const g = c.getContext("2d");
+      const img = g.createImageData(size, size);
+      for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+          const i = (y * size + x) * 4;
+          const nx = Math.sin(x * 0.11) * 0.35 + Math.sin(x * 0.03 + y * 0.04) * 0.25;
+          const nz = Math.cos(y * 0.1) * 0.35 + Math.cos(y * 0.025 + x * 0.02) * 0.25;
+          const ny = Math.sqrt(Math.max(0.02, 1 - nx * nx - nz * nz));
+          img.data[i] = (nx * 0.5 + 0.5) * 255;
+          img.data[i + 1] = (ny * 0.5 + 0.5) * 255;
+          img.data[i + 2] = (nz * 0.5 + 0.5) * 255;
+          img.data[i + 3] = 255;
+        }
+      }
+      g.putImageData(img, 0, 0);
+      const tex = new THREE.CanvasTexture(c);
+      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      tex.repeat.set(32, 32);
+      tex.anisotropy = 8;
+      tex.colorSpace = THREE.LinearSRGBColorSpace;
+      return tex;
+    }
+
+    const scene = new THREE.Scene();
+    const fogDay = new THREE.Color(0xc5d2e6);
+    const fogNight = new THREE.Color(0x1a1418);
+    const fogWork = new THREE.Color();
+    scene.fog = new THREE.FogExp2(0xc5d2e6, 0.0038);
+
+    const renderer = new THREE.WebGLRenderer({
+      canvas,
+      antialias: true,
+      alpha: false,
+      powerPreference: "high-performance",
+    });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight, false);
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 0.76;
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+    const camera = new THREE.PerspectiveCamera(36, window.innerWidth / window.innerHeight, 0.1, 500);
+    camera.position.set(0.2, 2.45, 8.2);
+    camera.lookAt(1.8, 1.15, 0);
+
+    const controls = new OrbitControls(camera, canvas);
+    controls.target.set(1.6, 1.05, 0);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.06;
+    controls.minDistance = 4;
+    controls.maxDistance = 24;
+    controls.maxPolarAngle = Math.PI * 0.49;
+
+    const sun = new THREE.DirectionalLight(0xfff2dd, 2.2);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(4096, 4096);
+    sun.shadow.camera.near = 8;
+    sun.shadow.camera.far = 130;
+    sun.shadow.camera.left = -40;
+    sun.shadow.camera.right = 40;
+    sun.shadow.camera.top = 40;
+    sun.shadow.camera.bottom = -40;
+    sun.shadow.bias = -0.00012;
+    sun.shadow.normalBias = 0.022;
+    scene.add(sun);
+
+    const fill = new THREE.HemisphereLight(0xa8c8ff, 0x4a5538, 0.52);
+    scene.add(fill);
+
+    const rim = new THREE.DirectionalLight(0xd0ddf8, 0.32);
+    rim.position.set(28, 14, -32);
+    scene.add(rim);
+
+    const sky = new Sky();
+    sky.scale.setScalar(450000);
+    scene.add(sky);
+    const skyU = sky.material.uniforms;
+    skyU["turbidity"].value = 5.5;
+    skyU["rayleigh"].value = 1.55;
+    skyU["mieCoefficient"].value = 0.0045;
+    skyU["mieDirectionalG"].value = 0.76;
+    const phi = THREE.MathUtils.degToRad(87.8);
+    const theta = THREE.MathUtils.degToRad(125);
+    sun.position.setFromSphericalCoords(85, phi, theta);
+    skyU["sunPosition"].value.copy(sun.position).normalize();
+
+    const groundNor = proceduralNormalCanvas(512);
+    const hillTex = proceduralNoiseCanvas(512, 1.2, 0.75, 0.95, 0.72);
+    const dryTex = proceduralNoiseCanvas(512, 2.1, 1.05, 0.92, 0.78);
+
+    const hillMat = new THREE.MeshPhysicalMaterial({
+      map: hillTex,
+      normalMap: groundNor,
+      normalScale: new THREE.Vector2(0.5, 0.5),
+      color: new THREE.Color(0x4a6b3a),
+      roughness: 0.88,
+      metalness: 0.02,
+      clearcoat: 0.05,
+      envMapIntensity: 0.3,
+    });
+    const dryMat = new THREE.MeshPhysicalMaterial({
+      map: dryTex,
+      normalMap: groundNor,
+      normalScale: new THREE.Vector2(0.55, 0.55),
+      color: new THREE.Color(0x8f7a52),
+      roughness: 0.94,
+      metalness: 0.02,
+      clearcoat: 0.03,
+      envMapIntensity: 0.25,
+    });
+
+    const hillGround = new THREE.Mesh(new THREE.PlaneGeometry(260, 130, 96, 48), hillMat);
+    hillGround.rotation.x = -Math.PI / 2;
+    hillGround.rotation.z = -0.04;
+    hillGround.position.set(0, 0.06, -48);
+    hillGround.receiveShadow = true;
+    scene.add(hillGround);
+
+    const valleyGround = new THREE.Mesh(new THREE.PlaneGeometry(260, 130, 96, 48), dryMat);
+    valleyGround.rotation.x = -Math.PI / 2;
+    valleyGround.rotation.z = 0.035;
+    valleyGround.position.set(0, 0, 48);
+    valleyGround.receiveShadow = true;
+    scene.add(valleyGround);
+
+    const grassCount = 15000;
+    const grassGeo = new THREE.ConeGeometry(0.016, 0.4, 4, 2, true);
+    grassGeo.translate(0, 0.2, 0);
+    const grassMatHill = new THREE.MeshPhysicalMaterial({
+      color: new THREE.Color(0x1a4218),
+      emissive: new THREE.Color(0x061808),
+      emissiveIntensity: 0.07,
+      roughness: 0.8,
+      metalness: 0,
+      side: THREE.DoubleSide,
+      transparent: true,
+      alphaTest: 0.32,
+    });
+    const grassMatDry = new THREE.MeshPhysicalMaterial({
+      color: new THREE.Color(0x4a4a28),
+      emissive: new THREE.Color(0x121008),
+      emissiveIntensity: 0.05,
+      roughness: 0.88,
+      metalness: 0,
+      side: THREE.DoubleSide,
+      transparent: true,
+      alphaTest: 0.32,
+    });
+    const grassHill = new THREE.InstancedMesh(grassGeo, grassMatHill, Math.floor(grassCount * 0.55));
+    const grassDry = new THREE.InstancedMesh(grassGeo, grassMatDry, grassCount - grassHill.count);
+    grassHill.castShadow = grassDry.castShadow = true;
+    grassHill.receiveShadow = grassDry.receiveShadow = true;
+
+    const dummy = new THREE.Object3D();
+    function scatterGrass(inst, count, zMax, zMin, exclude) {
+      const grassPhase = new Float32Array(count);
+      const grassXZ = new Float32Array(count * 2);
+      const grassScale = new Float32Array(count);
+      const grassRotY = new Float32Array(count);
+      let gi = 0;
+      while (gi < count) {
+        const x = (Math.random() - 0.5) * 95;
+        const z = zMin + Math.random() * (zMax - zMin);
+        if (exclude(x, z)) continue;
+        grassXZ[gi * 2] = x;
+        grassXZ[gi * 2 + 1] = z;
+        grassPhase[gi] = Math.random() * Math.PI * 2;
+        grassRotY[gi] = Math.random() * Math.PI * 2;
+        grassScale[gi] = 0.6 + Math.random() * 1.05;
+        dummy.position.set(x, 0, z);
+        dummy.rotation.set(0, grassRotY[gi], 0);
+        dummy.scale.setScalar(grassScale[gi]);
+        dummy.updateMatrix();
+        inst.setMatrixAt(gi, dummy.matrix);
+        gi++;
+      }
+      inst.instanceMatrix.needsUpdate = true;
+      return { grassPhase, grassXZ, grassScale, grassRotY };
+    }
+
+    const excl = (x, z) => x > -5 && x < 4 && z > -4 && z < 5;
+    const gH = scatterGrass(grassHill, grassHill.count, -2, -95, excl);
+    const gD = scatterGrass(grassDry, grassDry.count, 95, 4, excl);
+    scene.add(grassHill, grassDry);
+
+    function buildCow(darkMul = 1) {
+      const hide = new THREE.MeshPhysicalMaterial({
+        color: new THREE.Color().setRGB(0.22 * darkMul, 0.19 * darkMul, 0.16 * darkMul),
+        roughness: 0.62,
+        metalness: 0,
+        clearcoat: 0.1,
+        clearcoatRoughness: 0.55,
+      });
+      const dark = new THREE.MeshPhysicalMaterial({
+        color: 0x1e1a18,
+        roughness: 0.75,
+        metalness: 0,
+      });
+      const g = new THREE.Group();
+      const body = new THREE.Mesh(new THREE.BoxGeometry(1.35, 0.95, 0.72, 2, 2, 2), hide);
+      body.position.y = 0.85;
+      body.castShadow = true;
+      body.receiveShadow = true;
+      g.add(body);
+      const chest = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.62, 0.58), hide);
+      chest.position.set(0.82, 0.92, 0);
+      chest.castShadow = true;
+      g.add(chest);
+      const head = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.38, 0.4), hide);
+      head.position.set(1.18, 1.05, 0);
+      head.castShadow = true;
+      g.add(head);
+      const sn = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.16, 0.22, 10), dark);
+      sn.rotation.z = Math.PI / 2;
+      sn.position.set(1.45, 0.98, 0);
+      sn.castShadow = true;
+      g.add(sn);
+      const legG = new THREE.CylinderGeometry(0.09, 0.07, 0.72, 8);
+      const lp = [
+        [-0.45, 0.36, 0.28],
+        [-0.45, 0.36, -0.28],
+        [0.35, 0.36, 0.28],
+        [0.35, 0.36, -0.28],
+      ];
+      for (const [lx, ly, lz] of lp) {
+        const leg = new THREE.Mesh(legG, dark);
+        leg.position.set(lx, ly, lz);
+        leg.castShadow = true;
+        g.add(leg);
+      }
+      return g;
+    }
+
+    const cowHill = buildCow(1);
+    const cowDry = buildCow(0.92);
+    const herd = [];
+    const herdRoot = new THREE.Group();
+    scene.add(herdRoot);
+    for (let i = 0; i < 16; i++) {
+      const tpl = i % 2 === 0 ? cowHill : cowDry;
+      const c = tpl.clone(false);
+      const x = 2.8 + Math.random() * 10;
+      const z = -4 + Math.random() * 8;
+      c.position.set(x, 0, z);
+      c.rotation.y = Math.random() * Math.PI * 2;
+      c.traverse((o) => {
+        if (o.isMesh) {
+          o.castShadow = true;
+          o.receiveShadow = true;
+        }
+      });
+      herdRoot.add(c);
+      const bias = Math.random() < 0.5 ? 1 : -1;
+      herd.push({
+        mesh: c,
+        homeX: x,
+        homeZ: z,
+        bias,
+        roam: 0.0002 + Math.random() * 0.00025,
+      });
+    }
+
+    const skinMat = new THREE.MeshPhysicalMaterial({
+      color: 0xc9a88a,
+      roughness: 0.42,
+      metalness: 0,
+      sheen: 0.35,
+      sheenRoughness: 0.55,
+      sheenColor: new THREE.Color(0xffe8dc),
+      clearcoat: 0.08,
+      clearcoatRoughness: 0.4,
+    });
+    const clothMat = new THREE.MeshPhysicalMaterial({
+      color: 0x2a3036,
+      roughness: 0.88,
+      metalness: 0.02,
+    });
+    const bootMat = new THREE.MeshPhysicalMaterial({
+      color: 0x1a1512,
+      roughness: 0.65,
+      metalness: 0.05,
+    });
+
+    const herdsman = new THREE.Group();
+    herdsman.position.set(-2.35, 0, 0.25);
+    scene.add(herdsman);
+
+    const upperBody = new THREE.Group();
+    upperBody.position.set(0, 1.05, 0);
+    herdsman.add(upperBody);
+
+    const pelvis = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.24, 0.28, 12), clothMat);
+    pelvis.position.y = -0.07;
+    pelvis.castShadow = true;
+    upperBody.add(pelvis);
+
+    const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.26, 0.22, 0.58, 14), clothMat);
+    torso.position.y = 0.32;
+    torso.castShadow = true;
+    upperBody.add(torso);
+
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.16, 32, 28), skinMat);
+    head.position.set(0, 0.78, 0.02);
+    head.castShadow = true;
+    upperBody.add(head);
+
+    const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.12, 0.14, 10), skinMat);
+    neck.position.set(0, 0.64, 0);
+    neck.castShadow = true;
+    upperBody.add(neck);
+
+    const legG = new THREE.CylinderGeometry(0.1, 0.09, 0.78, 10);
+    const l1 = new THREE.Mesh(legG, clothMat);
+    l1.position.set(-0.12, 0.42, 0.05);
+    l1.castShadow = true;
+    herdsman.add(l1);
+    const l2 = new THREE.Mesh(legG, clothMat);
+    l2.position.set(0.12, 0.42, -0.04);
+    l2.castShadow = true;
+    herdsman.add(l2);
+    const b1 = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.12, 0.28), bootMat);
+    b1.position.set(-0.12, 0.04, 0.05);
+    b1.castShadow = true;
+    herdsman.add(b1);
+    const b2 = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.12, 0.28), bootMat);
+    b2.position.set(0.12, 0.04, -0.04);
+    b2.castShadow = true;
+    herdsman.add(b2);
+
+    const shoulderR = new THREE.Group();
+    shoulderR.position.set(0.28, 0.45, 0.08);
+    upperBody.add(shoulderR);
+
+    const shoulderL = new THREE.Group();
+    shoulderL.position.set(-0.28, 0.45, 0.08);
+    upperBody.add(shoulderL);
+
+    const upperArmR = new THREE.Mesh(new THREE.CapsuleGeometry(0.072, 0.3, 6, 10), clothMat);
+    upperArmR.position.set(0.16, -0.04, 0);
+    upperArmR.rotation.z = -0.52;
+    upperArmR.castShadow = true;
+    shoulderR.add(upperArmR);
+
+    const foreArmR = new THREE.Group();
+    foreArmR.position.set(0.32, -0.16, 0);
+    shoulderR.add(foreArmR);
+    const faMeshR = new THREE.Mesh(new THREE.CapsuleGeometry(0.062, 0.26, 6, 10), skinMat);
+    faMeshR.position.set(0.12, -0.1, 0);
+    faMeshR.rotation.z = -0.32;
+    faMeshR.castShadow = true;
+    foreArmR.add(faMeshR);
+    const wristR = new THREE.Object3D();
+    wristR.position.set(0.36, -0.3, 0);
+    foreArmR.add(wristR);
+
+    const upperArmL = new THREE.Mesh(new THREE.CapsuleGeometry(0.072, 0.3, 6, 10), clothMat);
+    upperArmL.position.set(-0.16, -0.04, 0);
+    upperArmL.rotation.z = 0.52;
+    upperArmL.castShadow = true;
+    shoulderL.add(upperArmL);
+
+    const foreArmL = new THREE.Group();
+    foreArmL.position.set(-0.32, -0.16, 0);
+    shoulderL.add(foreArmL);
+    const faMeshL = new THREE.Mesh(new THREE.CapsuleGeometry(0.062, 0.26, 6, 10), skinMat);
+    faMeshL.position.set(-0.12, -0.1, 0);
+    faMeshL.rotation.z = 0.32;
+    faMeshL.castShadow = true;
+    foreArmL.add(faMeshL);
+    const wristL = new THREE.Object3D();
+    wristL.position.set(-0.36, -0.3, 0);
+    foreArmL.add(wristL);
+
+    const leatherMat = new THREE.MeshPhysicalMaterial({
+      color: new THREE.Color(0x151010),
+      roughness: 0.45,
+      metalness: 0.05,
+      clearcoat: 0.2,
+      clearcoatRoughness: 0.32,
+    });
+
+    const WHIP_SEG = 36;
+    const whipSegGeo = new THREE.CylinderGeometry(1, 1, 1, 10, 1, true);
+    whipSegGeo.translate(0, 0.5, 0);
+    const whipMeshR = new THREE.InstancedMesh(whipSegGeo, leatherMat, WHIP_SEG);
+    const whipMeshL = new THREE.InstancedMesh(whipSegGeo, leatherMat, WHIP_SEG);
+    whipMeshR.castShadow = whipMeshL.castShadow = true;
+    whipMeshR.receiveShadow = whipMeshL.receiveShadow = true;
+    scene.add(whipMeshR, whipMeshL);
+
+    const tipGeo = new THREE.SphereGeometry(0.032, 14, 12);
+    const tipMat = new THREE.MeshPhysicalMaterial({
+      color: 0x1a0f0a,
+      roughness: 0.35,
+      metalness: 0.1,
+    });
+    const tipR = new THREE.Mesh(tipGeo, tipMat);
+    const tipL = new THREE.Mesh(tipGeo, tipMat);
+    tipR.castShadow = tipL.castShadow = true;
+    scene.add(tipR, tipL);
+
+    function makeBurst() {
+      return new THREE.Mesh(
+        new THREE.SphereGeometry(0.42, 20, 18),
+        new THREE.MeshBasicMaterial({
+          color: 0xfff2e6,
+          transparent: true,
+          opacity: 0,
+          depthWrite: false,
+          blending: THREE.AdditiveBlending,
+        })
+      );
+    }
+    const crackBurstR = makeBurst();
+    const crackBurstL = makeBurst();
+    scene.add(crackBurstR, crackBurstL);
+
+    const crackLightR = new THREE.PointLight(0xfff0e0, 0, 12, 2);
+    const crackLightL = new THREE.PointLight(0xffe8d8, 0, 12, 2);
+    scene.add(crackLightR, crackLightL);
+
+    const fireLight = new THREE.PointLight(0xff6a2a, 0, 6, 1.8);
+    fireLight.position.set(-1.2, 0.35, 1.1);
+    scene.add(fireLight);
+    const ember = new THREE.Mesh(
+      new THREE.SphereGeometry(0.12, 10, 8),
+      new THREE.MeshBasicMaterial({
+        color: 0xff9944,
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      })
+    );
+    ember.position.copy(fireLight.position);
+    scene.add(ember);
+
+    const _q = new THREE.Quaternion();
+    const _s = new THREE.Vector3();
+    const _m = new THREE.Matrix4();
+    const _ax = new THREE.Vector3(0, 1, 0);
+
+    function updateWhipInstances(pts, mesh) {
+      for (let i = 0; i < WHIP_SEG; i++) {
+        const a = pts[i].p;
+        const b = pts[i + 1].p;
+        const mid = new THREE.Vector3().addVectors(a, b).multiplyScalar(0.5);
+        const dirv = new THREE.Vector3().subVectors(b, a);
+        const segLen = Math.max(0.001, dirv.length());
+        dirv.normalize();
+        _q.setFromUnitVectors(_ax, dirv);
+        const r0 = 0.011 + pts[i].thick * 0.052;
+        const r1 = 0.011 + pts[i + 1].thick * 0.052;
+        _s.set((r0 + r1) * 0.5, segLen, (r0 + r1) * 0.5);
+        _m.compose(mid, _q, _s);
+        mesh.setMatrixAt(i, _m);
+      }
+      mesh.instanceMatrix.needsUpdate = true;
+    }
+
+    function setDualPose(armR, armL, twist) {
+      upperBody.rotation.y = twist * 0.55;
+      upperBody.rotation.z = twist * 0.08;
+
+      shoulderR.rotation.y = -0.32;
+      shoulderR.rotation.x = -0.12 + armR * 0.52;
+      shoulderR.rotation.z = -0.18 + armR * 0.32;
+      foreArmR.rotation.z = -0.52 - armR * 0.28;
+
+      shoulderL.rotation.y = 0.32;
+      shoulderL.rotation.x = -0.12 - armL * 0.48;
+      shoulderL.rotation.z = 0.18 - armL * 0.3;
+      foreArmL.rotation.z = 0.52 + armL * 0.26;
+    }
+
+    let audioCtx = null;
+    function playNoiseBurst(delayMs, freq, gain) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      if (!audioCtx) audioCtx = new AC();
+      if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+      const t0 = audioCtx.currentTime + delayMs / 1000;
+      const noise = audioCtx.createBufferSource();
+      const buf = audioCtx.createBuffer(1, Math.floor(audioCtx.sampleRate * 0.07), audioCtx.sampleRate);
+      const d = buf.getChannelData(0);
+      for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * Math.exp(-i / (d.length * 0.11));
+      noise.buffer = buf;
+      const bp = audioCtx.createBiquadFilter();
+      bp.type = "bandpass";
+      bp.frequency.value = freq;
+      bp.Q.value = 0.55;
+      const g = audioCtx.createGain();
+      g.gain.setValueAtTime(gain, t0);
+      g.gain.exponentialRampToValueAtTime(0.001, t0 + 0.055);
+      noise.connect(bp);
+      bp.connect(g);
+      g.connect(audioCtx.destination);
+      noise.start(t0);
+      noise.stop(t0 + 0.07);
+    }
+
+    function playDualCrack() {
+      playNoiseBurst(0, 2400, 0.32);
+      playNoiseBurst(16, 1650, 0.28);
+    }
+
+    window.addEventListener("resize", () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight, false);
+    });
+
+    const handR = new THREE.Vector3();
+    const handL = new THREE.Vector3();
+
+    function updateGrassWind(inst, data, count, now) {
+      const w = Math.sin(now * 0.0018) * 0.55 + Math.sin(now * 0.00085 + 1) * 0.35;
+      for (let i = 0; i < count; i++) {
+        const x = data.grassXZ[i * 2];
+        const z = data.grassXZ[i * 2 + 1];
+        const ph = data.grassPhase[i];
+        const sway = w * 0.5 + Math.sin(now * 0.0021 + ph) * 0.24;
+        dummy.position.set(x, 0, z);
+        dummy.rotation.set(sway * 0.38, data.grassRotY[i] + sway * 0.07, sway * 0.24);
+        dummy.scale.setScalar(data.grassScale[i]);
+        dummy.updateMatrix();
+        inst.setMatrixAt(i, dummy.matrix);
+      }
+      inst.instanceMatrix.needsUpdate = true;
+    }
+
+    function animate(now) {
+      requestAnimationFrame(animate);
+      const storyU = cyclePhase(now);
+      const innerU = storyToWhipU(storyU);
+      const st = whipState(innerU);
+      if (st.phase === "crack" && prevPhase !== "crack") {
+        lastCrack = now;
+        playDualCrack();
+      }
+      prevPhase = st.phase;
+
+      const scatter = herdScatterAmount(storyU);
+      const gather = herdGatherAmount(storyU);
+
+      const motion = whipMotion(innerU);
+      setDualPose(motion.armR, motion.armL, motion.twist);
+      herdsman.updateMatrixWorld(true);
+      wristR.getWorldPosition(handR);
+      wristL.getWorldPosition(handL);
+
+      const ptsR = buildWhipPoints(
+        handR,
+        motion.armR,
+        motion.reach,
+        motion.coil,
+        motion.tipBoost,
+        motion.droop,
+        now,
+        1
+      );
+      const ptsL = buildWhipPoints(
+        handL,
+        motion.armL,
+        motion.reach,
+        motion.coil,
+        motion.tipBoost,
+        motion.droop,
+        now,
+        -1
+      );
+
+      updateWhipInstances(ptsR, whipMeshR);
+      updateWhipInstances(ptsL, whipMeshL);
+
+      const tipPosR = ptsR[ptsR.length - 1].p;
+      const tipPosL = ptsL[ptsL.length - 1].p;
+      tipR.position.copy(tipPosR);
+      tipL.position.copy(tipPosL);
+
+      const cf = motion.crackFlash;
+      crackBurstR.position.copy(tipPosR);
+      crackBurstL.position.copy(tipPosL);
+      crackBurstR.material.opacity = cf * 0.5;
+      crackBurstL.material.opacity = cf * 0.48;
+      crackBurstR.scale.setScalar(0.35 + cf * 1.9);
+      crackBurstL.scale.setScalar(0.32 + cf * 1.75);
+      crackLightR.position.copy(tipPosR);
+      crackLightL.position.copy(tipPosL);
+      crackLightR.intensity = cf * 26;
+      crackLightL.intensity = cf * 22;
+
+      const evening = storyU > 0.82 ? (storyU - 0.82) / 0.18 : 0;
+      fireLight.intensity = evening * 2.2;
+      ember.material.opacity = evening * 0.55;
+      ember.scale.setScalar(1 + Math.sin(now * 0.008) * 0.15);
+      renderer.toneMappingExposure = 0.76 - evening * 0.12;
+      fogWork.copy(fogDay).lerp(fogNight, evening * 0.55);
+      scene.fog.color.copy(fogWork);
+
+      const crackAge = now - lastCrack;
+      const pulse = crackAge < 480 ? Math.exp(-crackAge / 210) : 0;
+
+      for (let i = 0; i < herd.length; i++) {
+        const h = herd[i];
+        const m = h.mesh;
+        m.position.x += Math.sin(now * 0.0006 + i) * h.roam * (1 - gather * 0.85);
+        const targetZ = h.homeZ - h.bias * 11 * scatter;
+        m.position.z += (targetZ - m.position.z) * 0.028 * scatter;
+        if (gather > 0.02) {
+          m.position.x += (h.homeX - m.position.x) * gather * 0.035;
+          m.position.z += (h.homeZ - m.position.z) * gather * 0.038;
+        }
+        if (pulse > 0.1) {
+          m.rotation.y += pulse * 0.042 * (1 + h.bias * 0.15);
+        } else {
+          m.rotation.y += Math.sin(now * 0.00075 + i) * 0.0005;
+        }
+      }
+
+      updateGrassWind(grassHill, gH, grassHill.count, now);
+      updateGrassWind(grassDry, gD, grassDry.count, now);
+
+      const osc = Math.sin(now * 0.00032) * 0.1;
+      camera.position.x = osc;
+      controls.update();
+      renderer.render(scene, camera);
+    }
+
+    requestAnimationFrame(animate);
+  </script>
+</body>
+</html>
