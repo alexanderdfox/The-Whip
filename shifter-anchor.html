@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title></title>
+  <style>
+    * { margin: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #020810; }
+    canvas { display: block; width: 100%; height: 100%; }
+  </style>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.170.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.170.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <script type="module">
+    import * as THREE from "three";
+    import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+    const canvas = document.createElement("canvas");
+    document.body.appendChild(canvas);
+
+    const CYCLE = 28;
+
+    function uPhase(now) {
+      return (now % (CYCLE * 1000)) / (CYCLE * 1000);
+    }
+
+    function smoothstep(a, b, x) {
+      const t = Math.max(0, Math.min(1, (x - a) / (b - a)));
+      return t * t * (3 - 2 * t);
+    }
+
+    function story(u) {
+      return {
+        drift: smoothstep(0, 0.12, u) * (1 - smoothstep(0.62, 0.72, u)),
+        mimic: smoothstep(0.1, 0.22, u) * (1 - smoothstep(0.2, 0.28, u)),
+        stone: smoothstep(0.22, 0.32, u) * (1 - smoothstep(0.3, 0.38, u)),
+        ink: smoothstep(0.32, 0.42, u) * (1 - smoothstep(0.4, 0.52, u)),
+        returnSm: smoothstep(0.44, 0.56, u) * (1 - smoothstep(0.54, 0.64, u)),
+        touch: smoothstep(0.52, 0.6, u) * (1 - smoothstep(0.58, 0.68, u)),
+        reveal: smoothstep(0.58, 0.68, u) * (1 - smoothstep(0.66, 0.78, u)),
+        alone: smoothstep(0.7, 0.82, u),
+        release: smoothstep(0.78, 1, u),
+      };
+    }
+
+    const scene = new THREE.Scene();
+    const fogCol = new THREE.Color(0x061a2e);
+    scene.background = fogCol.clone();
+    scene.fog = new THREE.FogExp2(0x0a2844, 0.045);
+
+    const renderer = new THREE.WebGLRenderer({
+      canvas,
+      antialias: true,
+      powerPreference: "high-performance",
+    });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight, false);
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 0.72;
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+    const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.08, 120);
+    camera.position.set(2.1, 1.35, 3.6);
+
+    const controls = new OrbitControls(camera, canvas);
+    controls.target.set(0.2, 0.55, 0);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.06;
+    controls.minDistance = 1.8;
+    controls.maxDistance = 9;
+
+    const waterKey = new THREE.DirectionalLight(0xa8d8ff, 1.15);
+    waterKey.position.set(-1.2, 6, 2.5);
+    waterKey.castShadow = true;
+    waterKey.shadow.mapSize.set(2048, 2048);
+    waterKey.shadow.bias = -0.0002;
+    scene.add(waterKey);
+
+    const bio = new THREE.HemisphereLight(0x4a7a9a, 0x0a1020, 0.55);
+    scene.add(bio);
+
+    const caust = new THREE.SpotLight(0xb8f0ff, 0.55, 18, 0.65, 0.45, 1);
+    caust.position.set(2, 5.5, 1.2);
+    caust.target.position.set(0, 0, 0);
+    scene.add(caust);
+    scene.add(caust.target);
+
+    const seabed = new THREE.Mesh(
+      new THREE.PlaneGeometry(40, 40, 64, 64),
+      new THREE.MeshStandardMaterial({
+        color: 0xc9b89a,
+        roughness: 0.95,
+        metalness: 0,
+      })
+    );
+    seabed.rotation.x = -Math.PI / 2;
+    seabed.receiveShadow = true;
+    const pos = seabed.geometry.attributes.position;
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i);
+      const z = pos.getZ(i);
+      pos.setY(i, Math.sin(x * 0.7) * 0.04 + Math.cos(z * 0.55) * 0.035);
+    }
+    pos.needsUpdate = true;
+    seabed.geometry.computeVertexNormals();
+    scene.add(seabed);
+
+    const ringGeo = new THREE.RingGeometry(0.35, 0.52, 48);
+    const ringMat = new THREE.MeshStandardMaterial({
+      color: 0xe8dcc8,
+      roughness: 0.88,
+      metalness: 0,
+      emissive: new THREE.Color(0x223344),
+      emissiveIntensity: 0.15,
+      transparent: true,
+      opacity: 0.35,
+      side: THREE.DoubleSide,
+    });
+    const sandRing = new THREE.Mesh(ringGeo, ringMat);
+    sandRing.rotation.x = -Math.PI / 2;
+    sandRing.position.set(0, 0.02, 0);
+    sandRing.receiveShadow = true;
+    scene.add(sandRing);
+
+    function coralCluster(cx, cz, scale, hue) {
+      const g = new THREE.Group();
+      const mat = new THREE.MeshStandardMaterial({
+        color: new THREE.Color().setHSL(hue, 0.45, 0.38 + Math.random() * 0.1),
+        roughness: 0.78,
+        metalness: 0,
+      });
+      for (let i = 0; i < 9; i++) {
+        const m = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.04 * scale, 0.12 * scale, 0.4 + Math.random() * 0.55, 8, 3),
+          mat
+        );
+        m.position.set(
+          (Math.random() - 0.5) * 0.35 * scale,
+          m.geometry.parameters.height * 0.5,
+          (Math.random() - 0.5) * 0.35 * scale
+        );
+        m.rotation.z = (Math.random() - 0.5) * 0.35;
+        m.rotation.x = (Math.random() - 0.5) * 0.25;
+        m.castShadow = true;
+        m.receiveShadow = true;
+        g.add(m);
+      }
+      g.position.set(cx, 0, cz);
+      return g;
+    }
+    scene.add(coralCluster(-2.8, -1.6, 1.4, 0.02));
+    scene.add(coralCluster(2.4, -2.1, 1.1, 0.55));
+    scene.add(coralCluster(-1.2, 2.5, 1.2, 0.08));
+    scene.add(coralCluster(3.1, 1.4, 0.9, 0.52));
+
+    const bubbleGeo = new THREE.SphereGeometry(0.02, 6, 6);
+    const bubbleMat = new THREE.MeshPhysicalMaterial({
+      color: 0xd8f4ff,
+      transparent: true,
+      opacity: 0.35,
+      roughness: 0.1,
+      metalness: 0,
+      transmission: 0.55,
+      thickness: 0.2,
+    });
+    const BUB = 120;
+    const bubbles = new THREE.InstancedMesh(bubbleGeo, bubbleMat, BUB);
+    const bd = new THREE.Object3D();
+    const bxy = new Float32Array(BUB * 3);
+    const bsp = new Float32Array(BUB);
+    for (let i = 0; i < BUB; i++) {
+      bxy[i * 3] = (Math.random() - 0.5) * 6;
+      bxy[i * 3 + 1] = Math.random() * 4;
+      bxy[i * 3 + 2] = (Math.random() - 0.5) * 6;
+      bsp[i] = 0.15 + Math.random() * 0.45;
+    }
+    scene.add(bubbles);
+
+    const mantleGeo = new THREE.SphereGeometry(0.32, 36, 28);
+    mantleGeo.scale(1.15, 0.72, 1);
+    const mantleMat = new THREE.MeshPhysicalMaterial({
+      color: 0x6a2a4a,
+      roughness: 0.35,
+      metalness: 0.05,
+      clearcoat: 0.45,
+      clearcoatRoughness: 0.25,
+      emissive: new THREE.Color(0x220818),
+      emissiveIntensity: 0.25,
+    });
+    const mantle = new THREE.Mesh(mantleGeo, mantleMat);
+    mantle.castShadow = true;
+    mantle.receiveShadow = true;
+    const octo = new THREE.Group();
+    octo.add(mantle);
+    octo.position.set(0, 0.85, 0);
+    scene.add(octo);
+
+    const ghost = new THREE.Group();
+    const ghostShell = new THREE.Mesh(
+      new THREE.SphereGeometry(0.22, 20, 16),
+      new THREE.MeshPhysicalMaterial({
+        color: 0xa89888,
+        roughness: 0.55,
+        metalness: 0.1,
+        transparent: true,
+        opacity: 0.35,
+        emissive: new THREE.Color(0x112233),
+        emissiveIntensity: 0.2,
+      })
+    );
+    ghostShell.scale.set(1.15, 0.95, 1.1);
+    ghost.add(ghostShell);
+    ghost.position.set(0.55, 0.42, 0.35);
+    ghost.visible = false;
+    scene.add(ghost);
+
+    const ARMS = 8;
+    const SEG = 14;
+    const suckers = new THREE.InstancedMesh(
+      new THREE.SphereGeometry(0.045, 10, 8),
+      new THREE.MeshPhysicalMaterial({
+        color: 0x4a2a38,
+        roughness: 0.4,
+        metalness: 0.02,
+        clearcoat: 0.2,
+      }),
+      ARMS * SEG
+    );
+    suckers.castShadow = true;
+    scene.add(suckers);
+
+    const inkGeo = new THREE.SphereGeometry(0.06, 6, 5);
+    const inkMat = new THREE.MeshPhysicalMaterial({
+      color: 0x050508,
+      roughness: 0.9,
+      metalness: 0,
+      transparent: true,
+      opacity: 0.85,
+    });
+    const INK = 220;
+    const ink = new THREE.InstancedMesh(inkGeo, inkMat, INK);
+    scene.add(ink);
+
+    const crab = new THREE.Group();
+    crab.position.set(0.95, 0.14, 0.45);
+    const shellHeavy = new THREE.Mesh(
+      new THREE.SphereGeometry(0.2, 22, 18),
+      new THREE.MeshStandardMaterial({
+        color: 0x8a7a6a,
+        roughness: 0.7,
+        metalness: 0.05,
+        transparent: true,
+        opacity: 1,
+      })
+    );
+    shellHeavy.scale.set(1.25, 1.05, 1.15);
+    shellHeavy.position.y = 0.16;
+    shellHeavy.castShadow = true;
+    crab.add(shellHeavy);
+    const shellLight = new THREE.Mesh(
+      new THREE.SphereGeometry(0.14, 18, 14),
+      new THREE.MeshStandardMaterial({
+        color: 0xc5b5a2,
+        roughness: 0.55,
+        metalness: 0.02,
+        transparent: true,
+        opacity: 0,
+      })
+    );
+    shellLight.scale.set(1.1, 0.9, 1.05);
+    shellLight.position.y = 0.12;
+    shellLight.visible = false;
+    shellLight.castShadow = true;
+    crab.add(shellLight);
+    const body = new THREE.Mesh(
+      new THREE.BoxGeometry(0.22, 0.12, 0.16),
+      new THREE.MeshStandardMaterial({ color: 0x8b5a45, roughness: 0.65 })
+    );
+    body.position.y = 0.04;
+    body.castShadow = true;
+    crab.add(body);
+    const eye = new THREE.Mesh(
+      new THREE.SphereGeometry(0.025, 10, 8),
+      new THREE.MeshStandardMaterial({ color: 0x111118, roughness: 0.2 })
+    );
+    eye.position.set(0.1, 0.09, 0.06);
+    crab.add(eye);
+    const eye2 = eye.clone();
+    eye2.position.set(0.1, 0.09, -0.06);
+    crab.add(eye2);
+    const ant = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.008, 0.004, 0.14, 6),
+      new THREE.MeshStandardMaterial({ color: 0xaa9988, roughness: 0.5 })
+    );
+    ant.position.set(0.12, 0.11, 0.05);
+    ant.rotation.z = 0.5;
+    crab.add(ant);
+    const ant2 = ant.clone();
+    ant2.position.set(0.12, 0.11, -0.05);
+    ant2.rotation.z = -0.5;
+    crab.add(ant2);
+    scene.add(crab);
+
+    const fishGeo = new THREE.ConeGeometry(0.06, 0.22, 6);
+    fishGeo.rotateZ(-Math.PI / 2);
+    const fishMat = new THREE.MeshStandardMaterial({
+      color: 0xb8ccd8,
+      metalness: 0.35,
+      roughness: 0.35,
+    });
+    const F = 28;
+    const fish = new THREE.InstancedMesh(fishGeo, fishMat, F);
+    fish.castShadow = true;
+    scene.add(fish);
+
+    const _m = new THREE.Matrix4();
+    const _q = new THREE.Quaternion();
+    const _s = new THREE.Vector3(1, 1, 1);
+    const _p = new THREE.Vector3();
+    const _ax = new THREE.Vector3(0, 1, 0);
+
+    function layoutTentacles(now, mantleScale) {
+      let idx = 0;
+      const base = octo.position;
+      for (let a = 0; a < ARMS; a++) {
+        const ang = (a / ARMS) * Math.PI * 2 + now * 0.00025;
+        for (let i = 0; i < SEG; i++) {
+          const t = i / (SEG - 1);
+          const reach = 0.35 + t * 0.95 * mantleScale;
+          const wave =
+            Math.sin(t * Math.PI * 1.8 + now * 0.0018 + a * 0.7) * 0.18 +
+            Math.sin(t * 4 + now * 0.003 + a) * 0.06;
+          const wobble = Math.cos(t * 2.2 + now * 0.0012 + a * 1.1) * 0.08;
+          _p.set(
+            base.x + Math.cos(ang) * reach * 0.35 + Math.cos(ang + t) * wave,
+            base.y - t * 0.12 + wobble * 0.5,
+            base.z + Math.sin(ang) * reach * 0.35 + Math.sin(ang + t) * wave
+          );
+          const sc = 0.55 + t * 0.85;
+          _q.setFromAxisAngle(_ax, ang + t * 0.4);
+          _m.compose(_p, _q, new THREE.Vector3(sc, sc, sc));
+          suckers.setMatrixAt(idx++, _m);
+        }
+      }
+      suckers.instanceMatrix.needsUpdate = true;
+    }
+
+    function layoutFish(now) {
+      for (let i = 0; i < F; i++) {
+        const k = i / F;
+        const ang = k * Math.PI * 2 + now * 0.0004;
+        const r = 1.8 + (i % 5) * 0.35;
+        _p.set(Math.cos(ang) * r, 0.55 + Math.sin(i + now * 0.001) * 0.25, Math.sin(ang) * r);
+        const dir = Math.atan2(Math.cos(ang + 0.5), Math.sin(ang + 0.5));
+        _q.setFromAxisAngle(_ax, dir);
+        const sc = 0.8 + (i % 4) * 0.15;
+        _m.compose(_p, _q, new THREE.Vector3(sc, sc, sc));
+        fish.setMatrixAt(i, _m);
+      }
+      fish.instanceMatrix.needsUpdate = true;
+    }
+
+    window.addEventListener("resize", () => {
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight, false);
+    });
+
+    function animate(now) {
+      requestAnimationFrame(animate);
+      const u = uPhase(now);
+      const s = story(u);
+
+      caust.position.x = 1.5 + Math.sin(now * 0.0008) * 0.8;
+      caust.target.position.x = Math.sin(now * 0.0006) * 0.3;
+
+      const chroma = 0.5 + 0.5 * Math.sin(now * 0.0011);
+      const hue = 0.92 - chroma * 0.12 + s.ink * 0.05;
+      mantleMat.color.setHSL(hue, 0.35 + s.drift * 0.25, 0.28 + chroma * 0.18 + s.mimic * 0.15);
+      mantleMat.emissive.setHSL(hue + 0.05, 0.5, 0.08 + s.reveal * 0.35 + s.release * 0.12);
+      mantleMat.emissiveIntensity = 0.2 + s.returnSm * 0.5 + s.reveal * 0.9;
+      mantleMat.clearcoat = 0.35 + (1 - s.stone) * 0.35;
+      mantleMat.roughness = 0.25 + s.stone * 0.65;
+
+      const mScale = 1 - s.returnSm * 0.18 - s.alone * 0.25 + s.reveal * 0.08;
+      const inside = s.reveal * (1 - s.alone);
+      mantle.scale.set(1.15 * mScale, 0.72 * mScale * (1 - inside * 0.35), 1 * mScale);
+      mantle.rotation.set(
+        inside * Math.sin(now * 0.015) * 0.45,
+        0,
+        inside * Math.sin(now * 0.011) * 0.2
+      );
+
+      octo.position.y = 0.85 + Math.sin(now * 0.0009) * 0.06 * s.drift;
+      octo.rotation.y = now * 0.00015 * s.drift;
+      octo.visible = s.alone < 0.92;
+
+      ghost.visible = s.mimic > 0.08;
+      ghostShell.material.opacity = 0.22 + s.mimic * 0.35;
+      ghost.position.set(0.55 + s.mimic * 0.05, 0.42 + s.mimic * 0.08, 0.35);
+
+      const tentacleM = (1 - s.stone * 0.35 + s.returnSm * 0.15) * (1 + s.touch * 0.06);
+      layoutTentacles(now, tentacleM);
+      suckers.visible = octo.visible && s.stone < 0.95;
+
+      const inkCenter = octo.position.clone();
+      let inkIdx = 0;
+      for (let i = 0; i < INK; i++) {
+        const rnd = ((i * 12.9898) % 1000) / 1000;
+        const dir = new THREE.Vector3(
+          Math.cos(rnd * Math.PI * 2 + i),
+          Math.sin(rnd * 3.1),
+          Math.sin(rnd * Math.PI * 2 - i * 0.1)
+        ).normalize();
+        const exp = s.ink * (1.2 + rnd * 2.2);
+        _p.copy(inkCenter).addScaledVector(dir, exp * 1.1);
+        _p.y += rnd * 0.15 * s.ink;
+        const sc = (0.2 + rnd * 0.9) * (0.4 + s.ink);
+        _q.identity();
+        _m.compose(_p, _q, new THREE.Vector3(sc, sc, sc));
+        ink.setMatrixAt(inkIdx++, _m);
+      }
+      ink.instanceMatrix.needsUpdate = true;
+      ink.visible = s.ink > 0.05;
+      const inkFade = Math.max(0, 0.9 - (s.ink - 0.38) * 2);
+      inkMat.opacity = 0.12 + s.ink * 0.72 * inkFade;
+
+      ringMat.opacity = 0.12 + s.alone * 0.55 + s.release * 0.25;
+      ringMat.emissiveIntensity = 0.1 + s.alone * 0.55;
+
+      shellHeavy.visible = true;
+      shellLight.visible = s.release > 0.06;
+      const shellBlend = smoothstep(0.12, 0.52, s.release);
+      shellHeavy.material.opacity = Math.max(0, 1 - shellBlend * 1.12);
+      shellLight.material.opacity = Math.max(0, shellBlend * 1.05 - 0.08);
+      crab.position.x = 0.95 + Math.sin(now * 0.0005) * 0.04 * (0.3 + s.release);
+      crab.position.z = 0.45 + s.release * 0.15;
+      crab.rotation.y = s.release * 0.35;
+
+      layoutFish(now);
+
+      for (let i = 0; i < BUB; i++) {
+        const x = bxy[i * 3];
+        const y = ((bxy[i * 3 + 1] + now * 0.0001 * bsp[i]) % 4.5) + 0.1;
+        const z = bxy[i * 3 + 2];
+        bd.position.set(x, y, z);
+        bd.scale.setScalar(0.8 + (i % 5) * 0.12);
+        bd.updateMatrix();
+        bubbles.setMatrixAt(i, bd.matrix);
+      }
+      bubbles.instanceMatrix.needsUpdate = true;
+
+      scene.fog.density = 0.042 + s.ink * 0.055 + s.alone * 0.02;
+
+      controls.update();
+      renderer.render(scene, camera);
+    }
+
+    requestAnimationFrame(animate);
+  </script>
+</body>
+</html>
